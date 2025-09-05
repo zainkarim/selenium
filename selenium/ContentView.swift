@@ -1,4 +1,4 @@
-//
+////
 //  ContentView.swift
 //  selenium
 //
@@ -10,35 +10,47 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var cam = CameraManager()
 
-    // Values (display/solve)
-    @State private var targetISO: Int = 400      // locked by default
-    @State private var comp: Double = 0.0        // EV compensation (slider for Step A)
-    @State private var userAperture: Double = 5.6 // locked by default
+    // MARK: - Auto/Manual model
+    // ISO is always manual. The auto param is whichever of aperture/shutter is NOT being directly controlled.
+    enum AutoParam { case aperture, shutter }
+    @State private var autoParam: AutoParam = .shutter // default: ISO + Aperture manual
+
+    // MARK: - Values
+    @State private var targetISO: Int = 400
+    @State private var comp: Double = 0.0
+    @State private var userAperture: Double = 5.6
     @State private var userShutter: Double = 1/125.0
 
-    // Locks (default ISO + aperture)
-    @State private var locks = LockState()
+    // MARK: - Scrub drivers & friction (pixels per 1/3-stop step)
+    @State private var scrubF = VerticalScrubber()
+    @State private var scrubT = VerticalScrubber()
+    @State private var scrubISO = VerticalScrubber()
+    @State private var scrubEV = VerticalScrubber()
+
+    @State private var frictionF: CGFloat = 512   // aperture
+    @State private var frictionT: CGFloat = 576   // shutter
+    @State private var frictionISO: CGFloat = 448 // ISO
+    @State private var frictionEV: CGFloat = 24  // EV
+
+    // For EV slider ticks
+    @State private var lastSnappedEV: Double = 0.0
 
     // Feedback
     @State private var saveMessage: String?
     @State private var showToast = false
 
-    // Computed solution based on locks
-    private func computeSuggestion() -> (f: Double, t: Double, iso: Int) {
-        // Live scene EV100
-        let ev100 = EVMath.ev100(aperture: cam.aperture, shutter: cam.shutter, iso: cam.iso)
-        // We'll map into target ISO (if ISO locked) otherwise solve it
-        var f = userAperture
-        var t = userShutter
-        var iso = targetISO
+    private let firstRunKey = "selenium.firstRunSeeded"
 
-        // Helper to snap & clamp
+    // MARK: - Solve (two manual, one auto)
+    private func computeSuggestion() -> (f: Double, t: Double, iso: Int) {
+        let ev100 = EVMath.ev100(aperture: cam.aperture, shutter: cam.shutter, iso: cam.iso)
+
         func snapF(_ x: Double) -> Double {
             let clamped = min(22.0, max(0.95, x))
             return StopsTable.nearest(clamped, in: StopsTable.fStops)
         }
         func snapT(_ x: Double) -> Double {
-            // clamp to 1/2000 ... 1/240 (fastest to slowest allowed)
+            // clamp to 1/2000 ... 1/240
             let minT = 1.0 / 2000.0, maxT = 1.0 / 240.0
             let clamped = min(maxT, max(minT, x))
             return StopsTable.nearest(clamped, in: StopsTable.shutters)
@@ -48,41 +60,35 @@ struct ContentView: View {
             return StopsTable.nearestISO(clamped)
         }
 
-        // If two are locked → solve the third
-        switch locks.locked {
-        case [.iso, .aperture]:
-            // solve shutter
-            let targetEV = EVMath.targetEV(ev100: ev100, targetISO: Double(iso), comp: comp)
+        var f = userAperture
+        var t = userShutter
+        let S = targetISO
+
+        switch autoParam {
+        case .shutter:
+            // Manual: ISO + Aperture → Auto: Shutter
+            let targetEV = EVMath.targetEV(ev100: ev100, targetISO: Double(S), comp: comp)
             let tRaw = (f * f) / pow(2.0, targetEV)
             t = snapT(tRaw)
-
-        case [.iso, .shutter]:
-            // solve aperture
-            let targetEV = EVMath.targetEV(ev100: ev100, targetISO: Double(iso), comp: comp)
+        case .aperture:
+            // Manual: ISO + Shutter → Auto: Aperture
+            let targetEV = EVMath.targetEV(ev100: ev100, targetISO: Double(S), comp: comp)
             let fRaw = sqrt(t * pow(2.0, targetEV))
             f = snapF(fRaw)
-
-        case [.aperture, .shutter]:
-            // solve ISO (then snap to nearest film-centric)
-            // EVt = log2(N^2 / t) - log2(S/100)  ⇒ S = 100 * 2^(log2(N^2/t) - EVt)
-            let EVt = ev100 + comp // because EV100 = ... at ISO100; target EVt adds comp only
-            let Sraw = 100.0 * pow(2.0, log2((f * f) / t) - EVt)
-            iso = snapISO(Int(Sraw.rounded()))
-        default:
-            // Fallback (shouldn't happen): default to ISO+aperture locked
-            let targetEV = EVMath.targetEV(ev100: ev100, targetISO: Double(iso), comp: comp)
-            let tRaw = (f * f) / pow(2.0, targetEV)
-            t = snapT(tRaw)
         }
-        return (f, t, iso)
+
+        return (f, t, snapISO(S))
     }
 
     // MARK: - Body
 
     var body: some View {
         ZStack {
-            if cam.isConfigured { CameraPreview(session: cam.session).ignoresSafeArea() }
-            else { Color.black.ignoresSafeArea() }
+            if cam.isConfigured {
+                CameraPreview(session: cam.session).ignoresSafeArea()
+            } else {
+                Color.black.ignoresSafeArea()
+            }
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -93,7 +99,23 @@ struct ContentView: View {
                     .safeAreaPadding(.bottom, 8)
             }
         }
-        .onAppear { cam.configure() }
+        .onAppear {
+            cam.configure()
+
+            // Seed friction into scrub drivers
+            scrubF.stepPixels = frictionF
+            scrubT.stepPixels = frictionT
+            scrubISO.stepPixels = frictionISO
+            scrubEV.stepPixels = frictionEV
+
+            // First run seed
+            if !UserDefaults.standard.bool(forKey: firstRunKey) {
+                targetISO = 400
+                userAperture = 5.6
+                autoParam = .shutter // aperture is manual by default
+                UserDefaults.standard.set(true, forKey: firstRunKey)
+            }
+        }
         .onDisappear { cam.stop() }
         .overlay(alignment: .bottom) {
             if showToast, let msg = saveMessage {
@@ -110,64 +132,189 @@ struct ContentView: View {
     private var bottomPanel: some View {
         GlassPanel {
             VStack(spacing: 12) {
-                exposureReadout // centered f / t / ISO / EC with tap-to-lock
-
-                // EC slider (only slider in Step A; Step B will make it a scrub)
-                HStack {
-                    Text("EC").font(Design.Text.label).frame(width: 44, alignment: .leading)
-                    Slider(value: $comp, in: -2...2, step: 1/3)
-                    Text(String(format: "%+.1f", comp)).font(Design.Text.label).frame(width: 56, alignment: .trailing)
-                }
-
+                exposureReadout   // centered f / Shutter / ISO / EV (tap to choose which is manual)
+                evRow             // EV slider with tick-on-1/3-stop (keep or remove later)
+                // (Shutter / Gallery / Flip row comes back in Step C)
             }
         }
     }
 
+    // MARK: - Readout (tap to pick which is manual; scrub to adjust)
     private var exposureReadout: some View {
-        let suggestion = computeSuggestion()
-        let displayF = suggestion.f
-        let displayT = suggestion.t
-        let displayISO = suggestion.iso
+        let s = computeSuggestion()
+        let displayF = s.f
+        let displayT = s.t
+        let displayISO = s.iso
 
-        return HStack(spacing: 20) {
-            valuePill(title: "f/", value: String(format: "%.1f", displayF), param: .aperture, isLocked: locks.isLocked(.aperture)) {
-                locks.toggle(.aperture)
-                if locks.isLocked(.aperture) { userAperture = displayF }
-            }
-            valuePill(title: "Shutter", value: EVMath.prettyShutter(displayT), param: .shutter, isLocked: locks.isLocked(.shutter)) {
-                locks.toggle(.shutter)
-                if locks.isLocked(.shutter) { userShutter = displayT }
-            }
-            valuePill(title: "ISO", value: "\(displayISO)", param: .iso, isLocked: locks.isLocked(.iso)) {
-                locks.toggle(.iso)
-                if locks.isLocked(.iso) { targetISO = displayISO }
-            }
-            // EC shown at far right for context
-            VStack(spacing: 2) {
-                Text(String(format: "%+.1f", comp)).font(Design.Text.overlay).foregroundStyle(.white)
-                Text("EV").font(Design.Text.caption).foregroundStyle(.white.opacity(0.9))
-            }
+        // manual/auto styles
+        let isApertureManual = (autoParam != .aperture)
+        let isShutterManual  = (autoParam != .shutter)
+        // ISO is always manual
+
+        return HStack(spacing: 22) {
+            scrubValue(
+                title: "Aperture",
+                stringValue: String(format: "%.1f", displayF),
+                isManual: isApertureManual,
+                onTap: {
+                    autoParam = .shutter  // Aperture becomes manual → Shutter becomes auto
+                    userAperture = displayF // seed manual with current suggestion
+                },
+                onStepUp: { stepAperture(+1) },
+                onStepDown: { stepAperture(-1) },
+                scrubber: $scrubF
+            )
+
+            scrubValue(
+                title: "Shutter",
+                stringValue: EVMath.prettyShutter(displayT),
+                isManual: isShutterManual,
+                onTap: {
+                    autoParam = .aperture // Shutter becomes manual → Aperture becomes auto
+                    userShutter = displayT // seed manual with current suggestion
+                },
+                onStepUp: { stepShutter(+1) },
+                onStepDown: { stepShutter(-1) },
+                scrubber: $scrubT
+            )
+
+            scrubValue(
+                title: "ISO",
+                stringValue: "\(displayISO)",
+                isManual: true, // ISO always manual
+                onTap: { /* ISO is always manual */ },
+                onStepUp: { stepISO(+1) },
+                onStepDown: { stepISO(-1) },
+                scrubber: $scrubISO
+            )
+
+            scrubValue(
+                title: "EV",
+                stringValue: String(format: "%+.1f", comp),
+                isManual: true, // scrubbable always
+                onTap: { /* no-op */ },
+                onStepUp: { stepEV(+1) },
+                onStepDown: { stepEV(-1) },
+                scrubber: $scrubEV,
+                treatAsEV: true
+            )
             .frame(minWidth: 58)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
     }
 
+    // MARK: - EV slider row (optional; keeps ticking in 1/3 steps)
+    private var evRow: some View {
+        HStack {
+            Text("EC").font(Design.Text.label).frame(width: 44, alignment: .leading)
+            Slider(value: $comp, in: -2...2, step: 1/3)
+                .onChange(of: comp) { new in
+                    let snapped = (round(new * 3.0) / 3.0)
+                    if snapped != lastSnappedEV {
+                        Haptics.tap()
+                        lastSnappedEV = snapped
+                    }
+                }
+            Text(String(format: "%+.1f", comp))
+                .font(Design.Text.label)
+                .frame(width: 56, alignment: .trailing)
+        }
+    }
+
+    // MARK: - Scrubbable value view
     @ViewBuilder
-    private func valuePill(title: String, value: String, param: Param, isLocked: Bool, onTap: @escaping () -> Void) -> some View {
-        let fg = isLocked ? Color.white : Color.white.opacity(0.75)
-        let weight: Font.Weight = isLocked ? .semibold : .regular
+    private func scrubValue(title: String,
+                            stringValue: String,
+                            isManual: Bool,
+                            onTap: @escaping () -> Void,
+                            onStepUp: @escaping () -> Void,
+                            onStepDown: @escaping () -> Void,
+                            scrubber: Binding<VerticalScrubber>,
+                            treatAsEV: Bool = false) -> some View {
+
+        let fg = isManual ? Color.white : Color.white.opacity(0.65)
+        let weight: Font.Weight = isManual ? .semibold : .regular
 
         VStack(spacing: 2) {
-            HStack(spacing: 6) {
-                if isLocked { Image(systemName: "lock.fill").font(.caption2).foregroundStyle(fg) }
-                Text(value).font(Design.Text.overlay.weight(weight)).foregroundStyle(fg)
-            }
-            Text(title).font(Design.Text.caption).foregroundStyle(.white.opacity(0.9))
+            Text(stringValue)
+                .font(Design.Text.overlay.weight(weight))
+                .foregroundStyle(fg)
+            Text(title)
+                .font(Design.Text.caption)
+                .foregroundStyle(.white.opacity(0.9))
         }
         .frame(minWidth: 84)
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
+        .gesture(TapGesture().onEnded { onTap() })
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 10, coordinateSpace: .local)
+                .onChanged { value in
+                    guard isManual || treatAsEV else { return }
+                    var s = scrubber.wrappedValue
+                    s.onChange(
+                        translation: value.translation,
+                        stepUp: { onStepUp() },   // haptic occurs inside step helpers only when value actually changes
+                        stepDown: { onStepDown() }
+                    )
+                    scrubber.wrappedValue = s
+                }
+                .onEnded { _ in
+                    var s = scrubber.wrappedValue
+                    s.reset()
+                    scrubber.wrappedValue = s
+                }
+        )
+    }
+
+    // MARK: - Step helpers (±1 means one 1/3-stop step). Haptics only if value changes (no tick at bounds).
+
+    private func stepAperture(_ dir: Int) {
+        let table = StopsTable.fStops
+        let current = StopsTable.nearest(userAperture, in: table)
+        guard let idx = table.firstIndex(of: current) else { return }
+        let newIdx = (idx + dir).clamped(to: 0...(table.count - 1))
+        guard newIdx != idx else { return } // at bound -> no tick
+        userAperture = table[newIdx]
+        Haptics.tap()
+    }
+
+    private func stepShutter(_ dir: Int) {
+        let table = StopsTable.shutters
+        let current = StopsTable.nearest(userShutter, in: table)
+        guard let idx = table.firstIndex(of: current) else { return }
+        let newIdx = (idx + dir).clamped(to: 0...(table.count - 1))
+        guard newIdx != idx else { return }
+        userShutter = table[newIdx]
+        Haptics.tap()
+    }
+
+    private func stepISO(_ dir: Int) {
+        let table = StopsTable.isos
+        let current = StopsTable.nearestISO(targetISO)
+        guard let idx = table.firstIndex(of: current) else { return }
+        let newIdx = (idx + dir).clamped(to: 0...(table.count - 1))
+        guard newIdx != idx else { return }
+        targetISO = table[newIdx]
+        Haptics.tap()
+    }
+
+    private func stepEV(_ dir: Int) {
+        let table = evSteps
+        let current = nearestEV(comp)
+        guard let idx = table.firstIndex(of: current) else { return }
+        let newIdx = (idx + dir).clamped(to: 0...(table.count - 1))
+        guard newIdx != idx else { return }
+        comp = table[newIdx]
+        Haptics.tap()
+    }
+
+    private var evSteps: [Double] {
+        // -2.0 ... +2.0 in 1/3 stops
+        stride(from: -2.0, through: 2.0, by: 1.0/3.0).map { Double(round($0 * 10) / 10) }
+    }
+    private func nearestEV(_ v: Double) -> Double {
+        evSteps.min(by: { abs($0 - v) < abs($1 - v) }) ?? v
     }
 
     private func toast(_ msg: String) {
@@ -179,6 +326,12 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Utils
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
 
 
 #Preview {
