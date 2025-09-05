@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import UIKit
 
 final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
@@ -23,6 +24,12 @@ final class CameraManager: NSObject, ObservableObject {
     private var obsISO: NSKeyValueObservation?
     private var obsDuration: NSKeyValueObservation?
     private var obsAperture: NSKeyValueObservation?
+    
+    private var inFlightDelegates: [AVCapturePhotoCaptureDelegate] = []
+
+
+    // NEW: photo output
+    private let photoOutput = AVCapturePhotoOutput()
 
     func configure() {
         sessionQueue.async {
@@ -41,6 +48,12 @@ final class CameraManager: NSObject, ObservableObject {
 
             self.session.addInput(input)
             self.device = device
+
+            // Add photo output
+            if self.session.canAddOutput(self.photoOutput) {
+                self.session.addOutput(self.photoOutput)
+            }
+
             self.session.commitConfiguration()
 
             self.startObservingExposure(on: device)
@@ -54,7 +67,6 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func startObservingExposure(on device: AVCaptureDevice) {
-        // Seed current values
         DispatchQueue.main.async {
             self.iso = Double(device.iso)
             self.aperture = Double(device.lensAperture)
@@ -80,6 +92,52 @@ final class CameraManager: NSObject, ObservableObject {
             guard self.session.isRunning else { return }
             self.session.stopRunning()
             DispatchQueue.main.async { self.isRunning = false }
+        }
+    }
+
+    // NEW: capture still image and return UIImage
+    func capturePhoto(completion: @escaping (UIImage?) -> Void) {
+        let settings = AVCapturePhotoSettings()
+        let delegate = PhotoDelegate(
+            onImage: { image in completion(image) },
+            onFinish: { [weak self] del in
+                // Release the strong reference when finished
+                self?.inFlightDelegates.removeAll { $0 === del }
+            }
+        )
+        // Keep a strong ref so callbacks happen
+        inFlightDelegates.append(delegate)
+        photoOutput.capturePhoto(with: settings, delegate: delegate)
+    }
+
+    // Inner delegate
+    private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+        private let onImage: (UIImage?) -> Void
+        private let onFinish: (AVCapturePhotoCaptureDelegate) -> Void
+
+        init(onImage: @escaping (UIImage?) -> Void,
+             onFinish: @escaping (AVCapturePhotoCaptureDelegate) -> Void) {
+            self.onImage = onImage
+            self.onFinish = onFinish
+        }
+
+        func photoOutput(_ output: AVCapturePhotoOutput,
+                         didFinishProcessingPhoto photo: AVCapturePhoto,
+                         error: Error?) {
+            guard error == nil,
+                  let data = photo.fileDataRepresentation(),
+                  let image = UIImage(data: data) else {
+                onImage(nil)
+                return
+            }
+            onImage(image)
+        }
+
+        func photoOutput(_ output: AVCapturePhotoOutput,
+                         didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+                         error: Error?) {
+            // Called after all processing callbacks — safe to release
+            onFinish(self)
         }
     }
 }
