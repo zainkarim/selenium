@@ -59,6 +59,15 @@ final class CameraManager: NSObject, ObservableObject {
                 self.session.addOutput(self.photoOutput)
             }
 
+            // Match preview: portrait 90° + mirror when front
+            if let photoConn = self.photoOutput.connection(with: .video) {
+                photoConn.automaticallyAdjustsVideoMirroring = false
+                photoConn.isVideoMirrored = (self.currentPosition == .front)
+                if photoConn.isVideoRotationAngleSupported(90) {
+                    photoConn.videoRotationAngle = 90
+                }
+            }
+
             self.session.commitConfiguration()
 
             self.startObservingExposure(on: device)
@@ -74,11 +83,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     // Toggle camera
+    @MainActor
     func switchCamera() {
-        sessionQueue.async {
-            self.currentPosition = (self.currentPosition == .back) ? .front : .back
-            self.configure()
-        }
+        currentPosition = (currentPosition == .back) ? .front : .back
+        sessionQueue.async { [weak self] in self?.configure() }
     }
 
     // MARK: - KVO for exposure readouts
@@ -144,26 +152,43 @@ final class CameraManager: NSObject, ObservableObject {
             self.onFinish = onFinish
         }
 
+        // CameraManager.swift → inside PhotoDelegate
         func photoOutput(_ output: AVCapturePhotoOutput,
                          didFinishProcessingPhoto photo: AVCapturePhoto,
                          error: Error?) {
             guard error == nil,
                   let data = photo.fileDataRepresentation(),
-                  var image = UIImage(data: data) else {
+                  let base = UIImage(data: data) else {
                 onImage(nil)
                 return
             }
-            // Mirror bitmap if this was taken with the front camera to match preview
-            if isFront, let cg = image.cgImage {
-                image = UIImage(cgImage: cg, scale: image.scale, orientation: .upMirrored)
-            }
-            onImage(image)
+
+            // Bake pixels to .up; mirror only for front
+            let shouldMirror = !isFront
+            let final = base.normalized(mirrorHorizontally: isFront)
+            onImage(final)
         }
 
         func photoOutput(_ output: AVCapturePhotoOutput,
                          didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
                          error: Error?) {
             onFinish(self)
+        }
+    }
+}
+
+private extension UIImage {
+    func normalized(mirrorHorizontally: Bool) -> UIImage {
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.scale = self.scale
+        fmt.opaque = false
+        return UIGraphicsImageRenderer(size: self.size, format: fmt).image { ctx in
+            let cg = ctx.cgContext
+            if mirrorHorizontally {
+                cg.translateBy(x: self.size.width, y: 0)
+                cg.scaleBy(x: -1, y: 1)
+            }
+            self.draw(in: CGRect(origin: .zero, size: self.size))
         }
     }
 }

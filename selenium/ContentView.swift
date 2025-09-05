@@ -53,11 +53,11 @@ struct ContentView: View {
             return StopsTable.nearest(clamped, in: StopsTable.fStops)
         }
         func snapT(_ x: Double) -> Double {
-            // clamp to 1/2000 ... 1/240
-            let minT = 1.0 / 2000.0, maxT = 1.0 / 240.0
+            let minT = 1.0 / 8000.0, maxT = 1.0 / 1.0 // now 1/8000 ... 1s
             let clamped = min(maxT, max(minT, x))
             return StopsTable.nearest(clamped, in: StopsTable.shutters)
         }
+
         func snapISO(_ x: Int) -> Int {
             let clamped = min(6400, max(64, x))
             return StopsTable.nearestISO(clamped)
@@ -225,8 +225,8 @@ struct ContentView: View {
                     autoParam = .aperture // Shutter becomes manual → Aperture becomes auto
                     userShutter = displayT // seed manual with current suggestion
                 },
-                onStepUp: { stepShutter(+1) },
-                onStepDown: { stepShutter(-1) },
+                onStepUp: { stepShutter(-1) },
+                onStepDown: { stepShutter(+1) },
                 scrubber: $scrubT
             )
 

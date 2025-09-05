@@ -24,7 +24,7 @@ enum OverlayRenderer {
             shadow.shadowBlurRadius = 6
             shadow.shadowOffset = .zero
 
-            var attrs: [NSAttributedString.Key: Any] = [
+            let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: UIColor.white,
                 .shadow: shadow

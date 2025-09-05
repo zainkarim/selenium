@@ -15,14 +15,22 @@ struct CameraPreview: UIViewRepresentable {
         let v = PreviewView()
         v.videoPreviewLayer.session = session
         v.videoPreviewLayer.videoGravity = .resizeAspectFill
-        // we’ll control mirroring manually
         v.videoPreviewLayer.connection?.automaticallyAdjustsVideoMirroring = false
         return v
     }
 
     func updateUIView(_ view: PreviewView, context: Context) {
-        guard let input = view.videoPreviewLayer.session?.inputs.first as? AVCaptureDeviceInput else { return }
-        view.videoPreviewLayer.connection?.isVideoMirrored = (input.device.position == .front)
+        guard
+            let conn = view.videoPreviewLayer.connection,
+            let input = view.videoPreviewLayer.session?.inputs.first as? AVCaptureDeviceInput
+        else { return }
+
+        conn.automaticallyAdjustsVideoMirroring = false
+        conn.isVideoMirrored = (input.device.position == .front)
+        
+        if conn.isVideoRotationAngleSupported(90) {
+            conn.videoRotationAngle = 90
+        }
     }
 }
 
