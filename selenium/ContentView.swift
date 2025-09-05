@@ -14,6 +14,9 @@ struct ContentView: View {
     // ISO is always manual. The auto param is whichever of aperture/shutter is NOT being directly controlled.
     enum AutoParam { case aperture, shutter }
     @State private var autoParam: AutoParam = .shutter // default: ISO + Aperture manual
+    
+    @State private var showGallery = false
+    @ObservedObject private var store: LocalStore = .shared
 
     // MARK: - Values
     @State private var targetISO: Int = 400
@@ -125,6 +128,11 @@ struct ContentView: View {
                     .animation(.spring(duration: 0.35), value: showToast)
             }
         }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView {
+                showGallery = false
+            }
+        }
     }
 
     // MARK: - Panel
@@ -134,7 +142,51 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 exposureReadout   // centered f / Shutter / ISO / EV (tap to choose which is manual)
                 evRow             // EV slider with tick-on-1/3-stop (keep or remove later)
-                // (Shutter / Gallery / Flip row comes back in Step C)
+                // Actions row
+                HStack {
+                    // Gallery (left)
+                    Button {
+                        Haptics.tap()
+                        store.load()
+                        showGallery = true
+                    } label: {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                    }
+
+                    Spacer()
+
+                    // Shutter (center)
+                    Button {
+                        Haptics.tap()
+                        takeAndSave()
+                    } label: {
+                        ZStack {
+                            Circle().fill(.white.opacity(0.95)).frame(width: 84, height: 84)
+                            Circle().strokeBorder(.black.opacity(0.25), lineWidth: 2).frame(width: 84, height: 84)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .shadow(radius: 8, y: 4)
+                    .accessibilityLabel("Shutter")
+
+                    Spacer()
+
+                    // Flip (right)
+                    Button {
+                        Haptics.tap()
+                        cam.switchCamera()
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath.camera")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                    }
+                }
+                .padding(.top, 2)
+
             }
         }
     }
@@ -322,6 +374,26 @@ struct ContentView: View {
         withAnimation { showToast = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             withAnimation { showToast = false }
+        }
+    }
+    private func takeAndSave() {
+        // Freeze values at capture time
+        let s = computeSuggestion()
+        let overlayText = "ISO \(targetISO) • f/\(String(format: "%.1f", s.f)) • \(EVMath.prettyShutter(s.t)) • \(comp >= 0 ? "+" : "")\(String(format: "%.1f", comp))EV"
+
+        cam.capturePhoto { image in
+            guard let base = image else { Haptics.error(); toast("Capture failed"); return }
+            let composited = OverlayRenderer.draw(on: base, text: overlayText)
+
+            Task { @MainActor in
+                if let _ = await LocalStore.shared.add(image: composited) {
+                    Haptics.success()
+                    toast("Saved to Gallery")
+                } else {
+                    Haptics.error()
+                    toast("Couldn’t save")
+                }
+            }
         }
     }
 }

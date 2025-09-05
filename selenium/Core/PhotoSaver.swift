@@ -33,3 +33,12 @@ enum PhotoSaver {
         }
     }
 }
+
+extension PhotoSaver {
+    static func saveFileURLToLibrary(_ url: URL, completion: @escaping (Bool, Error?) -> Void) {
+        guard let img = UIImage(contentsOfFile: url.path) else {
+            completion(false, nil); return
+        }
+        saveToLibrary(img, completion: completion) // uses your existing image saver
+    }
+}
