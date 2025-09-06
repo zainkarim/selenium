@@ -29,6 +29,12 @@ struct ContentView: View {
     @State private var scrubT = VerticalScrubber()
     @State private var scrubISO = VerticalScrubber()
     @State private var scrubEV = VerticalScrubber()
+    
+    // Active-scrub visual state
+    @State private var scrubbingF = false
+    @State private var scrubbingT = false
+    @State private var scrubbingISO = false
+    @State private var scrubbingEV = false
 
     @State private var frictionF: CGFloat = 512   // aperture
     @State private var frictionT: CGFloat = 576   // shutter
@@ -45,6 +51,10 @@ struct ContentView: View {
     //Onboarding
     @State private var showOnboarding = false
     private let onboardingKey = "selenium.onboarding.v1"
+    
+    private let evNudgeKey = "selenium.evNudge.v1"
+    @State private var evNudgeActive = false
+
 
     private let firstRunKey = "selenium.firstRunSeeded"
 
@@ -127,6 +137,20 @@ struct ContentView: View {
             if !UserDefaults.standard.bool(forKey: onboardingKey) {
                 showOnboarding = true
             }
+            
+            if !UserDefaults.standard.bool(forKey: evNudgeKey) {
+                // run a gentle double pulse after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    withAnimation(.easeInOut(duration: 0.6).repeatCount(2, autoreverses: true)) {
+                        evNudgeActive = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        evNudgeActive = false
+                        UserDefaults.standard.set(true, forKey: evNudgeKey)
+                    }
+                }
+            }
+
         }
         .onDisappear { cam.stop() }
         
@@ -164,25 +188,17 @@ struct ContentView: View {
                 evRow             // EV slider with tick-on-1/3-stop (keep or remove later)
                 // Actions row
                 HStack {
-                    // Gallery (left)
-                    Button {
-                        Haptics.tap()
-                        store.load()
-                        showGallery = true
-                    } label: {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.title2)
-                            .foregroundStyle(.white)
+                    // Gallery
+                    Button { Haptics.tap(); store.load(); showGallery = true } label: {
+                        Image(systemName: "photo.on.rectangle").font(.title2).foregroundStyle(.white)
                             .frame(width: 44, height: 44)
+                            .accessibilityLabel("Open gallery")
                     }
 
-                    Spacer()
+                    Spacer(minLength: 20)
 
-                    // Shutter (center)
-                    Button {
-                        Haptics.tap()
-                        takeAndSave()
-                    } label: {
+                    // Shutter
+                    Button { Haptics.tap(); takeAndSave() } label: {
                         ZStack {
                             Circle().fill(.white.opacity(0.95)).frame(width: 84, height: 84)
                             Circle().strokeBorder(.black.opacity(0.25), lineWidth: 2).frame(width: 84, height: 84)
@@ -192,20 +208,22 @@ struct ContentView: View {
                     .shadow(radius: 8, y: 4)
                     .accessibilityLabel("Shutter")
 
-                    Spacer()
+                    Spacer(minLength: 20)
 
-                    // Flip (right)
-                    Button {
-                        Haptics.tap()
-                        cam.switchCamera()
-                    } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-                            .font(.title2)
-                            .foregroundStyle(.white)
+                    // Flip
+                    Button { Haptics.tap(); cam.switchCamera() } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath.camera").font(.title2).foregroundStyle(.white)
                             .frame(width: 44, height: 44)
+                            .accessibilityLabel("Flip camera")
                     }
                 }
-                .padding(.top, 2)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Design.bigCorner).stroke(.white.opacity(0.06), lineWidth: 1)
+                )
+                .padding(.top, 4)
 
             }
         }
@@ -229,12 +247,14 @@ struct ContentView: View {
                 stringValue: String(format: "%.1f", displayF),
                 isManual: isApertureManual,
                 onTap: {
-                    autoParam = .shutter  // Aperture becomes manual → Shutter becomes auto
-                    userAperture = displayF // seed manual with current suggestion
+                    autoParam = .shutter
+                    userAperture = displayF
                 },
                 onStepUp: { stepAperture(+1) },
                 onStepDown: { stepAperture(-1) },
-                scrubber: $scrubF
+                scrubber: $scrubF,
+                treatAsEV: false,
+                isScrubbing: $scrubbingF
             )
 
             scrubValue(
@@ -242,35 +262,45 @@ struct ContentView: View {
                 stringValue: EVMath.prettyShutter(displayT),
                 isManual: isShutterManual,
                 onTap: {
-                    autoParam = .aperture // Shutter becomes manual → Aperture becomes auto
-                    userShutter = displayT // seed manual with current suggestion
+                    autoParam = .aperture
+                    userShutter = displayT
                 },
-                onStepUp: { stepShutter(-1) },
-                onStepDown: { stepShutter(+1) },
-                scrubber: $scrubT
+                onStepUp: { stepShutter(+1) },
+                onStepDown: { stepShutter(-1) },
+                scrubber: $scrubT,
+                treatAsEV: false,
+                isScrubbing: $scrubbingT
             )
 
             scrubValue(
                 title: "ISO",
                 stringValue: "\(displayISO)",
-                isManual: true, // ISO always manual
-                onTap: { /* ISO is always manual */ },
+                isManual: true,
+                onTap: { /* ISO always manual */ },
                 onStepUp: { stepISO(+1) },
                 onStepDown: { stepISO(-1) },
-                scrubber: $scrubISO
+                scrubber: $scrubISO,
+                treatAsEV: false,
+                isScrubbing: $scrubbingISO
             )
 
             scrubValue(
                 title: "EV",
                 stringValue: String(format: "%+.1f", comp),
-                isManual: true, // scrubbable always
+                isManual: true,
                 onTap: { /* no-op */ },
                 onStepUp: { stepEV(+1) },
                 onStepDown: { stepEV(-1) },
                 scrubber: $scrubEV,
-                treatAsEV: true
+                treatAsEV: true,
+                isScrubbing: $scrubbingEV
             )
             .frame(minWidth: 58)
+            .scaleEffect(evNudgeActive ? 1.06 : 1.0)
+            .opacity(evNudgeActive ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.6), value: evNudgeActive)
+
+
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
@@ -303,7 +333,8 @@ struct ContentView: View {
                             onStepUp: @escaping () -> Void,
                             onStepDown: @escaping () -> Void,
                             scrubber: Binding<VerticalScrubber>,
-                            treatAsEV: Bool = false) -> some View {
+                            treatAsEV: Bool = false,
+                            isScrubbing: Binding<Bool> = .constant(false)) -> some View {
 
         let fg = isManual ? Color.white : Color.white.opacity(0.65)
         let weight: Font.Weight = isManual ? .semibold : .regular
@@ -312,32 +343,38 @@ struct ContentView: View {
             Text(stringValue)
                 .font(Design.Text.overlay.weight(weight))
                 .foregroundStyle(fg)
+                .shadow(color: isScrubbing.wrappedValue ? .white.opacity(0.18) : .clear, radius: isScrubbing.wrappedValue ? 8 : 0, y: 0)
             Text(title)
                 .font(Design.Text.caption)
                 .foregroundStyle(.white.opacity(0.9))
         }
         .frame(minWidth: 84)
         .contentShape(Rectangle())
+        .scaleEffect(isScrubbing.wrappedValue ? 1.04 : 1.0)
+        .animation(.spring(response: 0.20, dampingFraction: 0.8), value: isScrubbing.wrappedValue)
         .gesture(TapGesture().onEnded { onTap() })
         .highPriorityGesture(
             DragGesture(minimumDistance: 10, coordinateSpace: .local)
                 .onChanged { value in
                     guard isManual || treatAsEV else { return }
+                    isScrubbing.wrappedValue = true
                     var s = scrubber.wrappedValue
                     s.onChange(
                         translation: value.translation,
-                        stepUp: { onStepUp() },   // haptic occurs inside step helpers only when value actually changes
+                        stepUp: { onStepUp() },
                         stepDown: { onStepDown() }
                     )
                     scrubber.wrappedValue = s
                 }
                 .onEnded { _ in
+                    isScrubbing.wrappedValue = false
                     var s = scrubber.wrappedValue
                     s.reset()
                     scrubber.wrappedValue = s
                 }
         )
     }
+
 
     // MARK: - Step helpers (±1 means one 1/3-stop step). Haptics only if value changes (no tick at bounds).
 
