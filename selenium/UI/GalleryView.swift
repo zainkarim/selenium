@@ -184,11 +184,11 @@ private struct BulkBar: View {
                 Button("Save to Photos", action: onSave).disabled(!canAct)
                 Spacer()
                 ShareLink(items: shareItems) {
-                    Label("", systemImage: "square.and.arrow.up")
+                    Label("Share", systemImage: "square.and.arrow.up")
                 }.disabled(shareItems.isEmpty)
                 Spacer()
                 Button(role: .destructive, action: onDelete) {
-                    Label("", systemImage: "trash")
+                    Label("Trash", systemImage: "trash")
                 }.disabled(!canAct)
             }
             .padding(.horizontal, 12)

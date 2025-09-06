@@ -41,6 +41,10 @@ struct ContentView: View {
     // Feedback
     @State private var saveMessage: String?
     @State private var showToast = false
+    
+    //Onboarding
+    @State private var showOnboarding = false
+    private let onboardingKey = "selenium.onboarding.v1"
 
     private let firstRunKey = "selenium.firstRunSeeded"
 
@@ -118,8 +122,24 @@ struct ContentView: View {
                 autoParam = .shutter // aperture is manual by default
                 UserDefaults.standard.set(true, forKey: firstRunKey)
             }
+            
+            // Onboarding
+            if !UserDefaults.standard.bool(forKey: onboardingKey) {
+                showOnboarding = true
+            }
         }
         .onDisappear { cam.stop() }
+        
+        .overlay {
+            if showOnboarding {
+                FirstRunOverlay {
+                    UserDefaults.standard.set(true, forKey: onboardingKey)
+                    withAnimation(.spring(response: 0.35)) { showOnboarding = false }
+                }
+                .transition(.opacity)
+            }
+        }
+
         .overlay(alignment: .bottom) {
             if showToast, let msg = saveMessage {
                 Toast(text: msg)
