@@ -26,6 +26,10 @@ final class CameraManager: NSObject, ObservableObject {
     private var obsDuration: NSKeyValueObservation?
     private var obsAperture: NSKeyValueObservation?
     private let photoOutput = AVCapturePhotoOutput()
+    
+    private let videoOutput = AVCaptureVideoDataOutput()
+    weak var sceneSink: SceneEngine?
+
 
     // Keep strong refs to photo delegates until capture finishes
     private var inFlightDelegates: [AVCapturePhotoCaptureDelegate] = []
@@ -57,6 +61,12 @@ final class CameraManager: NSObject, ObservableObject {
             // Add photo output if needed
             if self.session.canAddOutput(self.photoOutput), !self.session.outputs.contains(self.photoOutput) {
                 self.session.addOutput(self.photoOutput)
+            }
+            
+            if self.session.canAddOutput(self.videoOutput) {
+                self.videoOutput.setSampleBufferDelegate(self, queue: self.sessionQueue)
+                self.videoOutput.alwaysDiscardsLateVideoFrames = true
+                self.session.addOutput(self.videoOutput)
             }
 
             // Match preview: portrait 90° + mirror when front
@@ -189,6 +199,16 @@ private extension UIImage {
                 cg.scaleBy(x: -1, y: 1)
             }
             self.draw(in: CGRect(origin: .zero, size: self.size))
+        }
+    }
+}
+
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        DispatchQueue.main.async { [weak self] in
+            self?.sceneSink?.analyze(sampleBuffer: sampleBuffer)
         }
     }
 }

@@ -7,47 +7,59 @@
 
 import UIKit
 
+import UIKit
+
 enum OverlayRenderer {
-    /// Draws the given text at the lower-left corner with a soft shadow.
-    static func draw(on image: UIImage, text: String) -> UIImage {
-        let size = image.size
-        let scale = image.scale
+    static func draw(on base: UIImage, text: String) -> UIImage {
+        let scale = base.scale
+        let rendererFormat = UIGraphicsImageRendererFormat()
+        rendererFormat.scale = scale
+        rendererFormat.opaque = false
 
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let renderer = UIGraphicsImageRenderer(size: base.size, format: rendererFormat)
         return renderer.image { ctx in
-            image.draw(in: CGRect(origin: .zero, size: size))
+            base.draw(in: CGRect(origin: .zero, size: base.size))
 
-            // Text style
-            let font = UIFont.monospacedSystemFont(ofSize: 28, weight: .semibold)
-            let shadow = NSShadow()
-            shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
-            shadow.shadowBlurRadius = 6
-            shadow.shadowOffset = .zero
-
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: UIColor.white,
-                .shadow: shadow
+            // Typography
+            let titleFont = UIFont.monospacedSystemFont(ofSize: max(14, base.size.width * 0.038), weight: .semibold)
+            let attr: [NSAttributedString.Key : Any] = [
+                .font: titleFont,
+                .foregroundColor: UIColor.white
             ]
+            let padX: CGFloat = 14
+            let padY: CGFloat = 8
+            let corner: CGFloat = max(10, base.size.width * 0.025)
 
-            let margin: CGFloat = 18
-            let ns = text as NSString
-            let textSize = ns.size(withAttributes: attrs)
-            let origin = CGPoint(x: margin, y: size.height - textSize.height - margin)
+            let textSize = (text as NSString).size(withAttributes: attr)
+            let boxSize = CGSize(width: textSize.width + padX * 2, height: textSize.height + padY * 2)
 
-            // Draw background pill for legibility
-            let bgRect = CGRect(x: origin.x - 10,
-                                y: origin.y - 6,
-                                width: textSize.width + 20,
-                                height: textSize.height + 12)
-            let path = UIBezierPath(roundedRect: bgRect, cornerRadius: 10)
-            UIColor.black.withAlphaComponent(0.35).setFill()
-            path.fill()
+            // Position: bottom-left with margins
+            let margin: CGFloat = max(12, base.size.width * 0.03)
+            let origin = CGPoint(x: margin, y: base.size.height - margin - boxSize.height)
+            let rect = CGRect(origin: origin, size: boxSize)
 
-            ns.draw(at: origin, withAttributes: attrs)
-        }.with(scale: scale) // keep original scale
+            // Glass pill
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: corner)
+            ctx.cgContext.setFillColor(UIColor(white: 0, alpha: 0.35).cgColor)
+            ctx.cgContext.addPath(path.cgPath)
+            ctx.cgContext.fillPath()
+
+            // Stroke
+            ctx.cgContext.setStrokeColor(UIColor(white: 1, alpha: 0.10).cgColor)
+            ctx.cgContext.setLineWidth(1)
+            ctx.cgContext.addPath(path.cgPath)
+            ctx.cgContext.strokePath()
+
+            // Text
+            let textPoint = CGPoint(x: rect.minX + padX, y: rect.minY + padY)
+            (text as NSString).draw(at: textPoint, withAttributes: attr)
+
+            // Subtle outer shadow to lift from background
+            ctx.cgContext.setShadow(offset: .zero, blur: 0)
+        }
     }
 }
+
 
 private extension UIImage {
     func with(scale: CGFloat) -> UIImage {

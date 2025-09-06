@@ -5,11 +5,23 @@
 //  Created by Zain Karim on 9/5/25.
 //
 
+//
+//  GalleryView.swift
+//  selenium
+//
+
 import SwiftUI
+
+enum GalleryFilter: String, CaseIterable, Identifiable {
+    case all = "All", ai = "AI", manual = "Manual"
+    var id: String { rawValue }
+}
 
 struct GalleryView: View {
     @ObservedObject var store: LocalStore = .shared
     let onClose: () -> Void
+
+    @State private var filter: GalleryFilter = .all
 
     @State private var selecting = false
     @State private var selected = Set<UUID>()
@@ -19,26 +31,46 @@ struct GalleryView: View {
 
     @State private var navPath = NavigationPath()
 
+    private var filteredItems: [GalleryItem] {
+        switch filter {
+        case .all: return store.items
+        case .ai: return store.items.filter { $0.aiKind != nil }
+        case .manual: return store.items.filter { $0.aiKind == nil }
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $navPath) {
             VStack(spacing: 0) {
+
+                // Filter
+                Picker("Filter", selection: $filter) {
+                    ForEach(GalleryFilter.allCases) { f in Text(f.rawValue).tag(f) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+
+                // Grid
                 GalleryGrid(
-                    items: store.items,
+                    items: filteredItems,
                     selecting: selecting,
                     selected: selected,
                     onTapItem: { item in
                         if selecting {
                             toggle(item.id)
-                        } else if let idx = store.items.firstIndex(of: item) {
-                            navPath.append(idx) // push pager at index
+                        } else if let idx = filteredItems.firstIndex(of: item) {
+                            navPath.append(idx) // push pager at filtered index
                         }
                     },
                     onToggleSelect: { id in toggle(id) }
                 )
+
+                // Bulk bar (acts on selected items)
                 if selecting {
                     BulkBar(
                         canAct: !selected.isEmpty,
-                        onSelectAll: { selected = Set(store.items.map(\.id)) },
+                        onSelectAll: { selected = Set(filteredItems.map(\.id)) },
                         onSave: {
                             let urls = store.items.filter { selected.contains($0.id) }.map(\.url)
                             PhotoSaver.saveFileURLsToLibrary(urls) { ok, fail in
@@ -64,7 +96,7 @@ struct GalleryView: View {
                 }
             }
             .navigationDestination(for: Int.self) { idx in
-                GalleryPagerView(startIndex: idx, onClose: { navPath.removeLast() })
+                GalleryPagerView(items: filteredItems, startIndex: idx, onClose: { navPath.removeLast() })
             }
         }
         .onAppear { store.load() }
@@ -91,8 +123,6 @@ struct GalleryView: View {
         if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
     }
 
-    private func toggle(_ item: GalleryItem) { toggle(item.id) }
-
     private func toast(_ msg: String) {
         toastMsg = msg
         withAnimation { showToast = true }
@@ -116,6 +146,7 @@ private struct GalleryGrid: View {
             LazyVGrid(columns: cols, spacing: 8) {
                 ForEach(items) { item in
                     ZStack(alignment: .topTrailing) {
+
                         Button { onTapItem(item) } label: {
                             Thumbnail(url: item.url)
                                 .overlay(
@@ -127,6 +158,16 @@ private struct GalleryGrid: View {
                                             lineWidth: selected.contains(item.id) ? 3 : 1
                                         )
                                 )
+                                .overlay(alignment: .topLeading) {
+                                    if item.aiKind != nil {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                            .padding(6)
+                                            .background(.black.opacity(0.35), in: Capsule())
+                                            .padding(6)
+                                    }
+                                }
                         }
                         .buttonStyle(.plain)
 
@@ -201,15 +242,18 @@ private struct BulkBar: View {
 // MARK: - Pager (swipe left/right) with Save / Share / Delete
 
 struct GalleryPagerView: View {
-    @ObservedObject var store: LocalStore = .shared
+    let items: [GalleryItem]          // NEW: use same filtered source
     @State var index: Int
     let onClose: () -> Void
+
+    @ObservedObject var store: LocalStore = .shared
 
     @State private var showDeleteConfirm = false
     @State private var toastMsg: String?
     @State private var showToast = false
 
-    init(startIndex: Int, onClose: @escaping () -> Void) {
+    init(items: [GalleryItem], startIndex: Int, onClose: @escaping () -> Void) {
+        self.items = items
         _index = State(initialValue: startIndex)
         self.onClose = onClose
     }
@@ -217,14 +261,14 @@ struct GalleryPagerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if store.items.isEmpty {
+            if items.isEmpty {
                 Text("No photos").foregroundStyle(.secondary)
             } else {
                 TabView(selection: $index) {
-                    ForEach(store.items.indices, id: \.self) { i in
+                    ForEach(items.indices, id: \.self) { i in
                         GeometryReader { proxy in
                             let w = proxy.size.width, h = proxy.size.height
-                            if let ui = UIImage(contentsOfFile: store.items[i].url.path) {
+                            if let ui = UIImage(contentsOfFile: items[i].url.path) {
                                 Image(uiImage: ui)
                                     .resizable().scaledToFit()
                                     .frame(width: w, height: h)
@@ -269,8 +313,8 @@ struct GalleryPagerView: View {
     }
 
     private var currentItem: GalleryItem? {
-        guard store.items.indices.contains(index) else { return nil }
-        return store.items[index]
+        guard items.indices.contains(index) else { return nil }
+        return items[index]
     }
 
     private func saveToPhotos(_ item: GalleryItem) {
@@ -282,7 +326,7 @@ struct GalleryPagerView: View {
     private func deleteCurrent() {
         guard let item = currentItem else { return }
         store.delete([item])
-        if index >= store.items.count { index = max(0, store.items.count - 1) }
+        if index >= items.count { index = max(0, items.count - 1) }
         if store.items.isEmpty { onClose() } else { toast("Deleted") }
     }
 

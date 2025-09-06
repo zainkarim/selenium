@@ -54,6 +54,20 @@ struct ContentView: View {
     
     private let evNudgeKey = "selenium.evNudge.v1"
     @State private var evNudgeActive = false
+    
+    // Vision
+    @StateObject private var sceneEngine = SceneEngine()
+    @State private var aiEnabled = true
+
+    // Smoothing caches (for auto param only)
+    @State private var smoothedAutoF: Double?
+    @State private var smoothedAutoT: Double?
+
+    // Global AI bias gain (0…1). Start conservative.
+    @State private var aiGain: CGFloat = 0.6
+    
+    @State private var showAISheet = false
+    @State private var aiPreview = ""
 
 
     private let firstRunKey = "selenium.firstRunSeeded"
@@ -118,6 +132,7 @@ struct ContentView: View {
         }
         .onAppear {
             cam.configure()
+            cam.sceneSink = sceneEngine
 
             // Seed friction into scrub drivers
             scrubF.stepPixels = frictionF
@@ -150,9 +165,14 @@ struct ContentView: View {
                     }
                 }
             }
+            
+            LocalStore.shared.sceneEngine = sceneEngine
 
         }
-        .onDisappear { cam.stop() }
+        .onDisappear {
+            cam.sceneSink = nil
+            cam.stop()
+        }
         
         .overlay {
             if showOnboarding {
@@ -177,6 +197,18 @@ struct ContentView: View {
                 showGallery = false
             }
         }
+        .confirmationDialog("AI suggestion", isPresented: $showAISheet, titleVisibility: .visible) {
+            Button("Apply") {
+                commitAISuggestion(keepAutoSplit: true)   // don’t flip auto/manual
+            }
+            Button("Apply & make manual") {
+                commitAISuggestion(keepAutoSplit: false)  // flip to make this param manual
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(aiPreview)
+        }
+
     }
 
     // MARK: - Panel
@@ -186,6 +218,75 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 exposureReadout   // centered f / Shutter / ISO / EV (tap to choose which is manual)
                 evRow             // EV slider with tick-on-1/3-stop (keep or remove later)
+                HStack(spacing: 10) {
+                    Toggle(isOn: $aiEnabled) {
+                        Image(systemName: "sparkles")
+                            .symbolRenderingMode(.hierarchical)
+                    }
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+
+                    // Chip with confidence cue
+                    let conf = sceneEngine.latest.confidence
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                        Text(aiChipText()).lineLimit(1)
+                        HStack(spacing: 2) { // confidence dots (0–3)
+                            ForEach(0..<3, id: \.self) { i in
+                                Circle()
+                                    .fill(i < Int((conf * 3).rounded(.down)) ? Color.white.opacity(0.9) : Color.white.opacity(0.25))
+                                    .frame(width: 5, height: 5)
+                            }
+                        }
+                    }
+                    
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                            // Build a preview like: "→ f/2.2" or "→ 1/250"
+                            let s = computeSuggestion()
+                            var f = s.f, t = s.t
+                            if aiEnabled {
+                                let b = SceneHeuristics.bias(for: sceneEngine.scene)
+                                let conf = sceneEngine.latest.confidence
+                                switch autoParam {
+                                case .shutter:
+                                    let biasedT = SceneHeuristics.biasedToward(t, center: b.tCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                                    t = StopsTable.nearest(biasedT, in: StopsTable.shutters)
+                                    aiPreview = "→ \(EVMath.prettyShutter(t))"
+                                case .aperture:
+                                    let biasedF = SceneHeuristics.biasedToward(f, center: b.fCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                                    f = StopsTable.nearest(biasedF, in: StopsTable.fStops)
+                                    aiPreview = String(format: "→ f/%.1f", f)
+                                }
+                            } else {
+                                aiPreview = "AI off"
+                            }
+                            showAISheet = true
+                        }
+                    )
+
+                    .font(Design.Text.caption)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(.black.opacity(0.25), in: Capsule())
+                    .opacity(aiEnabled ? max(0.4, conf) : 0.4)
+
+                    Spacer()
+
+                    // Apply button: commit AI suggestion to manual control
+                    if aiEnabled, conf > 0.25 {
+                        Button {
+                            Haptics.tap()
+                            commitAISuggestion()
+                        } label: {
+                            Text("Apply")
+                                .font(Design.Text.label.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .accessibilityLabel("Apply AI suggestion")
+                    }
+                }
+
                 // Actions row
                 HStack {
                     // Gallery
@@ -235,6 +336,36 @@ struct ContentView: View {
         let displayF = s.f
         let displayT = s.t
         let displayISO = s.iso
+        
+        var fDisplay = s.f
+        var tDisplay = s.t
+
+        if aiEnabled {
+            let b = SceneHeuristics.bias(for: sceneEngine.scene)
+            let conf = sceneEngine.latest.confidence
+
+            switch autoParam {
+            case .shutter:
+                // Aperture is manual; bias shutter only (then snap)
+                let biasedT = SceneHeuristics.biasedToward(tDisplay,
+                                                           center: b.tCenter,
+                                                           userStrength: b.strength,
+                                                           confidence: conf,
+                                                           globalGain: aiGain)
+                tDisplay = StopsTable.nearest(biasedT, in: StopsTable.shutters)
+
+            case .aperture:
+                // Shutter is manual; bias aperture only (then snap)
+                let biasedF = SceneHeuristics.biasedToward(fDisplay,
+                                                           center: b.fCenter,
+                                                           userStrength: b.strength,
+                                                           confidence: conf,
+                                                           globalGain: aiGain)
+                fDisplay = StopsTable.nearest(biasedF, in: StopsTable.fStops)
+            }
+        }
+
+
 
         // manual/auto styles
         let isApertureManual = (autoParam != .aperture)
@@ -436,7 +567,36 @@ struct ContentView: View {
     private func takeAndSave() {
         // Freeze values at capture time
         let s = computeSuggestion()
-        let overlayText = "ISO \(targetISO) • f/\(String(format: "%.1f", s.f)) • \(EVMath.prettyShutter(s.t)) • \(comp >= 0 ? "+" : "")\(String(format: "%.1f", comp))EV"
+        
+        var fDisplay = s.f
+        var tDisplay = s.t
+
+        if aiEnabled {
+            let b = SceneHeuristics.bias(for: sceneEngine.scene)
+            let conf = sceneEngine.latest.confidence
+
+            switch autoParam {
+            case .shutter:
+                // Aperture is manual; bias shutter only
+                let biasedT = SceneHeuristics.biasedToward(tDisplay, center: b.tCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                // One-pole low-pass (light smoothing)
+                tDisplay = smooth(prev: &smoothedAutoT, new: biasedT, alpha: 0.35)
+                // Snap to your shutter stops
+                tDisplay = StopsTable.nearest(tDisplay, in: StopsTable.shutters)
+
+            case .aperture:
+                // Shutter is manual; bias aperture only
+                let biasedF = SceneHeuristics.biasedToward(fDisplay, center: b.fCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                fDisplay = smooth(prev: &smoothedAutoF, new: biasedF, alpha: 0.35)
+                fDisplay = StopsTable.nearest(fDisplay, in: StopsTable.fStops)
+            }
+        } else {
+            // Reset smoothing caches when AI is off
+            smoothedAutoF = nil
+            smoothedAutoT = nil
+        }
+        
+        let overlayText = "ISO \(targetISO) • f/\(String(format: "%.1f", fDisplay)) • \(EVMath.prettyShutter(tDisplay)) • \(comp >= 0 ? "+" : "")\(String(format: "%.1f", comp))EV"
 
         cam.capturePhoto { image in
             guard let base = image else { Haptics.error(); toast("Capture failed"); return }
@@ -452,6 +612,59 @@ struct ContentView: View {
                 }
             }
         }
+    }
+    
+    private func smooth(prev: inout Double?, new: Double, alpha: Double) -> Double {
+        guard let p = prev else { prev = new; return new }
+        let y = p * (1 - alpha) + new * alpha
+        prev = y
+        return y
+    }
+    
+    private func aiChipText() -> String {
+        switch sceneEngine.scene {
+        case .portrait:  return "Portrait • wider f/"
+        case .group:     return "Group • f/↑"
+        case .animal:    return "Animal • faster shutter"
+        case .plant:     return "Plant • wider f/"
+        case .landscape: return "Landscape • f/8–11"
+        case .other:     return "AI ready"
+        }
+    }
+
+    private func aiSummary(scene: SceneKind) -> String {
+        switch scene {
+        case .portrait:  return "Portrait: wider f/"
+        case .group:     return "Group: f/↑"
+        case .animal:    return "Animal: t↑"
+        case .plant:     return "Plant: f/↓"
+        case .landscape: return "Landscape: f/8–11"
+        case .other:     return "AI ready"
+        }
+    }
+
+    
+    private func commitAISuggestion(keepAutoSplit: Bool = false) {
+        let s = computeSuggestion()
+        var fDisplay = s.f
+        var tDisplay = s.t
+        if aiEnabled {
+            let b = SceneHeuristics.bias(for: sceneEngine.scene)
+            let conf = sceneEngine.latest.confidence
+            switch autoParam {
+            case .shutter:
+                let biasedT = SceneHeuristics.biasedToward(tDisplay, center: b.tCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                tDisplay = StopsTable.nearest(biasedT, in: StopsTable.shutters)
+                userShutter = tDisplay
+                if !keepAutoSplit { autoParam = .aperture }
+            case .aperture:
+                let biasedF = SceneHeuristics.biasedToward(fDisplay, center: b.fCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
+                fDisplay = StopsTable.nearest(biasedF, in: StopsTable.fStops)
+                userAperture = fDisplay
+                if !keepAutoSplit { autoParam = .shutter }
+            }
+        }
+        toast("Applied")
     }
 }
 
