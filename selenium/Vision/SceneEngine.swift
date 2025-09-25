@@ -9,6 +9,7 @@
 import Vision
 import AVFoundation
 import UIKit
+import CoreGraphics
 
 // Evidence reported each tick
 struct SceneEvidence {
@@ -23,7 +24,9 @@ struct SceneEvidence {
 @MainActor
 final class SceneEngine: NSObject, ObservableObject {
     @Published private(set) var scene: SceneKind = .other
-    @Published private(set) var latest: SceneEvidence = .init(kind: .other, faces: 0, faceMaxArea: 0, salientMaxArea: 0, label: "", confidence: 0)
+    @Published private(set) var latest: SceneEvidence = .init(
+        kind: .other, faces: 0, faceMaxArea: 0, salientMaxArea: 0, label: "", confidence: 0
+    )
 
     private var lastRun = Date.distantPast
     private let minInterval: TimeInterval = 0.6
@@ -36,11 +39,13 @@ final class SceneEngine: NSObject, ObservableObject {
 
         guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        // Requests
         let reqFaces = VNDetectFaceRectanglesRequest()
         let reqClass = VNClassifyImageRequest()
         let reqSal   = VNGenerateAttentionBasedSaliencyImageRequest()
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixel, orientation: .up, options: [:])
+
         q.async {
             do {
                 try handler.perform([reqFaces, reqClass, reqSal])
@@ -58,41 +63,78 @@ final class SceneEngine: NSObject, ObservableObject {
                         .max() ?? 0
                 }
 
-                // Classifier
+                // Classifier (top-1)
                 let top = reqClass.results?.first
-                let label = top?.identifier.lowercased() ?? ""
+                let rawLabel = top?.identifier ?? ""
+                let label = rawLabel.lowercased()
                 let labelConf = CGFloat(top?.confidence ?? 0)
 
-                // Heuristic kind
+                // ---- Heuristic thresholds (tunable) ----
+                let minLabelConfAnimal: CGFloat = 0.60
+                let minLabelConfPlant:  CGFloat = 0.70
+                let minLabelConfLand:   CGFloat = 0.65
+                let minAnyConfidence:   CGFloat = 0.50   // below this, prefer .other
+
+                // Tokenized "word" membership to avoid matching "implant", etc.
+                func hasWord(_ s: String, in text: String) -> Bool {
+                    let tokens = text.split(whereSeparator: { !$0.isLetter })
+                    return tokens.contains { $0 == Substring(s) }
+                }
+
+                let isPlantish =
+                    hasWord("plant", in: label)   || hasWord("flower", in: label) ||
+                    hasWord("leaf", in: label)    || hasWord("foliage", in: label) ||
+                    hasWord("tree", in: label)
+
+                let isAnimalish =
+                    hasWord("dog", in: label)     || hasWord("cat", in: label)    ||
+                    hasWord("animal", in: label)
+
+                let isLandscapey =
+                    hasWord("landscape", in: label) || hasWord("mountain", in: label) ||
+                    hasWord("sky", in: label)       || hasWord("architecture", in: label)
+
+                // ---- Decide SceneKind ----
                 let kind: SceneKind
-                if faces >= 2 { kind = .group(faces) }
-                else if faces == 1 { kind = .portrait(1) }
-                else if label.contains("dog") || label.contains("cat") || label.contains("animal") {
+                if faces >= 2 {
+                    kind = .group(faces)
+                } else if faces == 1 {
+                    kind = .portrait(1)
+                } else if isAnimalish && labelConf >= minLabelConfAnimal {
                     kind = .animal
-                } else if label.contains("flower") || label.contains("plant") || label.contains("leaf") || salientMax >= 0.40 {
-                    // "close-up" proxy: either plant-ish label OR large salient subject
+                } else if isPlantish && labelConf >= minLabelConfPlant {
                     kind = .plant
-                } else if label.contains("landscape") || label.contains("mountain") || label.contains("sky") || label.contains("architecture") {
+                } else if isLandscapey && labelConf >= minLabelConfLand {
                     kind = .landscape
+                } else if max(labelConf, salientMax) < minAnyConfidence {
+                    // Not confident enough overall → don't classify
+                    kind = .other
                 } else {
                     kind = .other
                 }
 
-                // Confidence blend: faces/area/label
+                // ---- Confidence blend: faces/area/label ----
                 // Face area weight if any face; else saliency; else label confidence
                 let faceWeight: CGFloat = min(1, faceMax * 3.2)      // bigger face → higher confidence
-                let salWeight:  CGFloat = min(1, salientMax * 1.8)   // big subject
-                // combine with label confidence but cap so it’s not jumpy
+                let salWeight:  CGFloat = min(1, salientMax * 1.8)   // big subject → confidence support
+                // combine with label confidence but cap so it's not jumpy
                 let conf = max(faceWeight, max(salWeight, min(1, labelConf)))
 
-                let ev = SceneEvidence(kind: kind, faces: faces, faceMaxArea: faceMax, salientMaxArea: salientMax, label: label, confidence: conf)
+                let ev = SceneEvidence(
+                    kind: kind,
+                    faces: faces,
+                    faceMaxArea: faceMax,
+                    salientMaxArea: salientMax,
+                    label: label,
+                    confidence: conf
+                )
 
                 DispatchQueue.main.async {
                     self.scene = kind
                     self.latest = ev
                 }
             } catch {
-                // swallow errors
+                // swallow Vision errors; keep last stable state
             }
         }
     }

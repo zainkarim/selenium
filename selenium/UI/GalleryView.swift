@@ -12,16 +12,10 @@
 
 import SwiftUI
 
-enum GalleryFilter: String, CaseIterable, Identifiable {
-    case all = "All", ai = "AI", manual = "Manual"
-    var id: String { rawValue }
-}
-
 struct GalleryView: View {
     @ObservedObject var store: LocalStore = .shared
     let onClose: () -> Void
 
-    @State private var filter: GalleryFilter = .all
 
     @State private var selecting = false
     @State private var selected = Set<UUID>()
@@ -31,35 +25,19 @@ struct GalleryView: View {
 
     @State private var navPath = NavigationPath()
 
-    private var filteredItems: [GalleryItem] {
-        switch filter {
-        case .all: return store.items
-        case .ai: return store.items.filter { $0.aiKind != nil }
-        case .manual: return store.items.filter { $0.aiKind == nil }
-        }
-    }
-
     var body: some View {
         NavigationStack(path: $navPath) {
             VStack(spacing: 0) {
 
-                // Filter
-                Picker("Filter", selection: $filter) {
-                    ForEach(GalleryFilter.allCases) { f in Text(f.rawValue).tag(f) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-
                 // Grid
                 GalleryGrid(
-                    items: filteredItems,
+                    items: store.items,
                     selecting: selecting,
                     selected: selected,
                     onTapItem: { item in
                         if selecting {
                             toggle(item.id)
-                        } else if let idx = filteredItems.firstIndex(of: item) {
+                        } else if let idx = store.items.firstIndex(of: item) {
                             navPath.append(idx) // push pager at filtered index
                         }
                     },
@@ -70,7 +48,7 @@ struct GalleryView: View {
                 if selecting {
                     BulkBar(
                         canAct: !selected.isEmpty,
-                        onSelectAll: { selected = Set(filteredItems.map(\.id)) },
+                        onSelectAll: { selected = Set(store.items.map(\.id)) },
                         onSave: {
                             let urls = store.items.filter { selected.contains($0.id) }.map(\.url)
                             PhotoSaver.saveFileURLsToLibrary(urls) { ok, fail in
@@ -96,7 +74,7 @@ struct GalleryView: View {
                 }
             }
             .navigationDestination(for: Int.self) { idx in
-                GalleryPagerView(items: filteredItems, startIndex: idx, onClose: { navPath.removeLast() })
+                GalleryPagerView(items: store.items, startIndex: idx, onClose: { navPath.removeLast() })
             }
         }
         .onAppear { store.load() }
@@ -284,9 +262,6 @@ struct GalleryPagerView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Back") { onClose() }
-            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if let current = currentItem {
                     Button { saveToPhotos(current) } label: {

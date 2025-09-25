@@ -1,4 +1,4 @@
-////
+//
 //  ContentView.swift
 //  selenium
 //
@@ -7,11 +7,15 @@
 
 import SwiftUI
 
+private struct PreviewWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct ContentView: View {
     @StateObject private var cam = CameraManager()
 
     // MARK: - Auto/Manual model
-    // ISO is always manual. The auto param is whichever of aperture/shutter is NOT being directly controlled.
     enum AutoParam { case aperture, shutter }
     @State private var autoParam: AutoParam = .shutter // default: ISO + Aperture manual
     
@@ -39,7 +43,7 @@ struct ContentView: View {
     @State private var frictionF: CGFloat = 512   // aperture
     @State private var frictionT: CGFloat = 576   // shutter
     @State private var frictionISO: CGFloat = 448 // ISO
-    @State private var frictionEV: CGFloat = 24  // EV
+    @State private var frictionEV: CGFloat = 24   // EV
 
     // For EV slider ticks
     @State private var lastSnappedEV: Double = 0.0
@@ -48,7 +52,7 @@ struct ContentView: View {
     @State private var saveMessage: String?
     @State private var showToast = false
     
-    //Onboarding
+    // Onboarding
     @State private var showOnboarding = false
     private let onboardingKey = "selenium.onboarding.v1"
     
@@ -68,6 +72,17 @@ struct ContentView: View {
     
     @State private var showAISheet = false
     @State private var aiPreview = ""
+    
+    @State private var showGrid = false
+    @State private var evDragActive = false
+    @State private var evDragAccum: CGFloat = 0   // pixels accumulated → 1/3 EV steps
+    @State private var previewWidth: CGFloat = 0
+    private let evPixelsPerThird: CGFloat = 32    // tune: higher = slower
+    
+    private let valueMinWidth: CGFloat = 84
+    
+    private let panelGap: CGFloat = 28
+    private let panelNarrowBy: CGFloat = 24
 
 
     private let firstRunKey = "selenium.firstRunSeeded"
@@ -81,11 +96,10 @@ struct ContentView: View {
             return StopsTable.nearest(clamped, in: StopsTable.fStops)
         }
         func snapT(_ x: Double) -> Double {
-            let minT = 1.0 / 8000.0, maxT = 1.0 / 1.0 // now 1/8000 ... 1s
+            let minT = 1.0 / 8000.0, maxT = 1.0 / 1.0 // 1/8000 … 1s
             let clamped = min(maxT, max(minT, x))
             return StopsTable.nearest(clamped, in: StopsTable.shutters)
         }
-
         func snapISO(_ x: Int) -> Int {
             let clamped = min(6400, max(64, x))
             return StopsTable.nearestISO(clamped)
@@ -111,25 +125,133 @@ struct ContentView: View {
         return (f, t, snapISO(S))
     }
 
+
     // MARK: - Body
 
     var body: some View {
         ZStack {
-            if cam.isConfigured {
-                CameraPreview(session: cam.session).ignoresSafeArea()
-            } else {
-                Color.black.ignoresSafeArea()
-            }
+            // Simple backdrop; avoids double-rendering a second AVCapture layer.
+            Color.black.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-
-                bottomPanel
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
-                    .safeAreaPadding(.bottom, 8)
+            VStack(spacing: 12) {
+                // PREVIEW WINDOW (card)
+                let previewAspect: CGFloat = 2.0 / 3.0
+                
+                ZStack {
+                    if cam.isConfigured {
+                        CameraPreview(session: cam.session)
+                            .clipShape(RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.06), lineWidth: 1)
+                            )
+                            .shadow(radius: 20, y: 8)
+                    } else {
+                        // placeholder while the session spins up
+                        RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous)
+                            .fill(Color.black)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Design.bigCorner)
+                                    .strokeBorder(.white.opacity(0.06), lineWidth: 1)
+                            )
+                            .shadow(radius: 20, y: 8)
+                    }
+                    
+                    // GRID (see step 3 for stronger styling)
+                    if showGrid {
+                        RuleOfThirdsGrid(color: .white, lineWidth: 0.5)
+                    } else {
+                        RuleOfThirdsGrid(color: .white.opacity(0.0), lineWidth: 0.0)
+                        
+                    }
+                    
+                    // EV tap / vertical drag
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(TapGesture().onEnded { Haptics.tap(); comp = 0 })
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 6)
+                                .onChanged { v in
+                                    evDragActive = true
+                                    evDragAccum += v.translation.height
+                                    let thirds = Int((-evDragAccum / evPixelsPerThird).rounded(.towardZero))
+                                    if thirds != 0 {
+                                        stepEV(thirds > 0 ? +1 : -1)
+                                        evDragAccum -= CGFloat(thirds) * (-evPixelsPerThird)
+                                    }
+                                }
+                                .onEnded { _ in
+                                    evDragActive = false
+                                    evDragAccum = 0
+                                }
+                        )
+                    
+                    // Top controls (grid / AI)
+                    VStack {
+                        HStack {
+                            Button {
+                                Haptics.tap()
+                                withAnimation(.spring(response: 0.28)) { showGrid.toggle() }
+                            } label: {
+                                Image(systemName: "grid")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(showGrid ? .white : .white.opacity(0.6))
+                                    .frame(width: 32, height: 32)
+                                    .background(.black.opacity(0.25), in: Circle())
+                            }
+                            .padding(10)
+                            
+                            Spacer()
+                            
+                            Button {
+                                Haptics.tap()
+                                withAnimation(.spring(response: 0.25)) { aiEnabled.toggle() }
+                            } label: {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(aiEnabled ? .white : .white.opacity(0.6))
+                                    .frame(width: 32, height: 32)
+                                    .background(.black.opacity(0.25), in: Circle())
+                            }
+                            .padding(10)
+                        }
+                        Spacer()
+                    }
+                    // Bottom-center AI chip (icon only)  // NEW
+                    .overlay(alignment: .bottom) {
+                        if aiEnabled {
+                            AIChip(systemName: aiSceneSymbol())
+                                .padding(.bottom, 8)
+                        }
+                    }
+                    .zIndex(2)
+                }
+                .aspectRatio(previewAspect, contentMode: .fit)
+                .padding(.horizontal, Design.pad)
+                .padding(.top, 16)
+                // Report *final* laid-out width so we can match the panel to it
+                .background(
+                    GeometryReader { g in
+                        Color.clear
+                            .preference(key: PreviewWidthKey.self, value: g.size.width)
+                    }
+                )
+                .onPreferenceChange(PreviewWidthKey.self) { previewWidth = $0 }
+                .padding(.bottom, 8)
             }
         }
+        // Bottom control panel pinned to safe area
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Spacer(minLength: 0)
+                bottomPanel
+                    .frame(width: max(0, previewWidth - panelNarrowBy))
+                    .padding(.bottom, 8)
+                Spacer(minLength: 0)
+            }
+        }
+
+
         .onAppear {
             cam.configure()
             cam.sceneSink = sceneEngine
@@ -144,7 +266,7 @@ struct ContentView: View {
             if !UserDefaults.standard.bool(forKey: firstRunKey) {
                 targetISO = 400
                 userAperture = 5.6
-                autoParam = .shutter // aperture is manual by default
+                autoParam = .shutter
                 UserDefaults.standard.set(true, forKey: firstRunKey)
             }
             
@@ -154,7 +276,6 @@ struct ContentView: View {
             }
             
             if !UserDefaults.standard.bool(forKey: evNudgeKey) {
-                // run a gentle double pulse after a short delay
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     withAnimation(.easeInOut(duration: 0.6).repeatCount(2, autoreverses: true)) {
                         evNudgeActive = true
@@ -167,13 +288,11 @@ struct ContentView: View {
             }
             
             LocalStore.shared.sceneEngine = sceneEngine
-
         }
         .onDisappear {
             cam.sceneSink = nil
             cam.stop()
         }
-        
         .overlay {
             if showOnboarding {
                 FirstRunOverlay {
@@ -183,7 +302,6 @@ struct ContentView: View {
                 .transition(.opacity)
             }
         }
-
         .overlay(alignment: .bottom) {
             if showToast, let msg = saveMessage {
                 Toast(text: msg)
@@ -199,134 +317,79 @@ struct ContentView: View {
         }
         .confirmationDialog("AI suggestion", isPresented: $showAISheet, titleVisibility: .visible) {
             Button("Apply") {
-                commitAISuggestion(keepAutoSplit: true)   // don’t flip auto/manual
+                commitAISuggestion(keepAutoSplit: true)
             }
             Button("Apply & make manual") {
-                commitAISuggestion(keepAutoSplit: false)  // flip to make this param manual
+                commitAISuggestion(keepAutoSplit: false)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(aiPreview)
         }
-
     }
 
     // MARK: - Panel
 
     private var bottomPanel: some View {
-        GlassPanel {
+        GlassPanel(insets: .init(top: 10, leading: 8, bottom: 10, trailing: 8)) {
             VStack(spacing: 12) {
-                exposureReadout   // centered f / Shutter / ISO / EV (tap to choose which is manual)
-                evRow             // EV slider with tick-on-1/3-stop (keep or remove later)
-                HStack(spacing: 10) {
-                    Toggle(isOn: $aiEnabled) {
-                        Image(systemName: "sparkles")
-                            .symbolRenderingMode(.hierarchical)
-                    }
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-
-                    // Chip with confidence cue
-                    let conf = sceneEngine.latest.confidence
-                    HStack(spacing: 6) {
-                        Image(systemName: "sparkles")
-                        Text(aiChipText()).lineLimit(1)
-                        HStack(spacing: 2) { // confidence dots (0–3)
-                            ForEach(0..<3, id: \.self) { i in
-                                Circle()
-                                    .fill(i < Int((conf * 3).rounded(.down)) ? Color.white.opacity(0.9) : Color.white.opacity(0.25))
-                                    .frame(width: 5, height: 5)
-                            }
-                        }
-                    }
-                    
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                            // Build a preview like: "→ f/2.2" or "→ 1/250"
-                            let s = computeSuggestion()
-                            var f = s.f, t = s.t
-                            if aiEnabled {
-                                let b = SceneHeuristics.bias(for: sceneEngine.scene)
-                                let conf = sceneEngine.latest.confidence
-                                switch autoParam {
-                                case .shutter:
-                                    let biasedT = SceneHeuristics.biasedToward(t, center: b.tCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
-                                    t = StopsTable.nearest(biasedT, in: StopsTable.shutters)
-                                    aiPreview = "→ \(EVMath.prettyShutter(t))"
-                                case .aperture:
-                                    let biasedF = SceneHeuristics.biasedToward(f, center: b.fCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
-                                    f = StopsTable.nearest(biasedF, in: StopsTable.fStops)
-                                    aiPreview = String(format: "→ f/%.1f", f)
-                                }
-                            } else {
-                                aiPreview = "AI off"
-                            }
-                            showAISheet = true
-                        }
-                    )
-
-                    .font(Design.Text.caption)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.black.opacity(0.25), in: Capsule())
-                    .opacity(aiEnabled ? max(0.4, conf) : 0.4)
-
-                    Spacer()
-
-                    // Apply button: commit AI suggestion to manual control
-                    if aiEnabled, conf > 0.25 {
-                        Button {
-                            Haptics.tap()
-                            commitAISuggestion()
-                        } label: {
-                            Text("Apply")
-                                .font(Design.Text.label.weight(.semibold))
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-                        .accessibilityLabel("Apply AI suggestion")
-                    }
-                }
-
+                exposureReadout
                 // Actions row
                 HStack {
-                    // Gallery
+                    // Gallery (live thumb)
                     Button { Haptics.tap(); store.load(); showGallery = true } label: {
-                        Image(systemName: "photo.on.rectangle").font(.title2).foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .accessibilityLabel("Open gallery")
+                        if let first = store.items.first, let ui = UIImage(contentsOfFile: first.url.path) {
+                            Image(uiImage: ui)
+                                .resizable().scaledToFill()
+                                .frame(width: 52, height: 52)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.08), lineWidth: 1))
+                                .shadow(radius: 8, y: 4)
+                        } else {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(.white.opacity(0.1))
+                                .frame(width: 52, height: 52)
+                                .overlay(Image(systemName: "photo").font(.title3).foregroundStyle(.white.opacity(0.8)))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.08), lineWidth: 1))
+                        }
                     }
 
-                    Spacer(minLength: 20)
+                    .accessibilityLabel("Open gallery")
+
+                    Spacer(minLength: 40)
 
                     // Shutter
                     Button { Haptics.tap(); takeAndSave() } label: {
                         ZStack {
-                            Circle().fill(.white.opacity(0.95)).frame(width: 84, height: 84)
-                            Circle().strokeBorder(.black.opacity(0.25), lineWidth: 2).frame(width: 84, height: 84)
+                            Circle().fill(.white.opacity(0.95)).frame(width: 72, height: 72 )
+                            Circle().strokeBorder(.black.opacity(0.25), lineWidth: 1.5).frame(width: 60, height: 60)
                         }
                     }
                     .buttonStyle(.plain)
                     .shadow(radius: 8, y: 4)
                     .accessibilityLabel("Shutter")
 
-                    Spacer(minLength: 20)
+                    Spacer(minLength: 40)
 
-                    // Flip
+                    // Flip camera
                     Button { Haptics.tap(); cam.switchCamera() } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera").font(.title2).foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .accessibilityLabel("Flip camera")
+                        Image(systemName: "arrow.triangle.2.circlepath.camera")
+                            .font(.title3)
+                            .frame(width: 52, height: 52)
+                            .background(.black.opacity(0.25), in: Circle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Flip camera")
                 }
-                .padding(.horizontal, 12)
+                .frame(maxWidth: 256)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Design.bigCorner).stroke(.white.opacity(0.06), lineWidth: 1)
-                )
-                .padding(.top, 4)
+                .padding(.horizontal, 20)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: Design.bigCorner, style: .continuous))
 
+                .padding(.top, 4)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -336,51 +399,13 @@ struct ContentView: View {
         let displayF = s.f
         let displayT = s.t
         let displayISO = s.iso
-        
-        var fDisplay = s.f
-        var tDisplay = s.t
-
-        if aiEnabled {
-            let b = SceneHeuristics.bias(for: sceneEngine.scene)
-            let conf = sceneEngine.latest.confidence
-
-            switch autoParam {
-            case .shutter:
-                // Aperture is manual; bias shutter only (then snap)
-                let biasedT = SceneHeuristics.biasedToward(tDisplay,
-                                                           center: b.tCenter,
-                                                           userStrength: b.strength,
-                                                           confidence: conf,
-                                                           globalGain: aiGain)
-                tDisplay = StopsTable.nearest(biasedT, in: StopsTable.shutters)
-
-            case .aperture:
-                // Shutter is manual; bias aperture only (then snap)
-                let biasedF = SceneHeuristics.biasedToward(fDisplay,
-                                                           center: b.fCenter,
-                                                           userStrength: b.strength,
-                                                           confidence: conf,
-                                                           globalGain: aiGain)
-                fDisplay = StopsTable.nearest(biasedF, in: StopsTable.fStops)
-            }
-        }
-
-
-
-        // manual/auto styles
-        let isApertureManual = (autoParam != .aperture)
-        let isShutterManual  = (autoParam != .shutter)
-        // ISO is always manual
 
         return HStack(spacing: 22) {
             scrubValue(
                 title: "Aperture",
                 stringValue: String(format: "%.1f", displayF),
-                isManual: isApertureManual,
-                onTap: {
-                    autoParam = .shutter
-                    userAperture = displayF
-                },
+                isManual: (autoParam != .aperture),
+                onTap: { autoParam = .shutter; userAperture = displayF },
                 onStepUp: { stepAperture(+1) },
                 onStepDown: { stepAperture(-1) },
                 scrubber: $scrubF,
@@ -391,11 +416,8 @@ struct ContentView: View {
             scrubValue(
                 title: "Shutter",
                 stringValue: EVMath.prettyShutter(displayT),
-                isManual: isShutterManual,
-                onTap: {
-                    autoParam = .aperture
-                    userShutter = displayT
-                },
+                isManual: (autoParam != .shutter),
+                onTap: { autoParam = .aperture; userShutter = displayT },
                 onStepUp: { stepShutter(+1) },
                 onStepDown: { stepShutter(-1) },
                 scrubber: $scrubT,
@@ -407,7 +429,7 @@ struct ContentView: View {
                 title: "ISO",
                 stringValue: "\(displayISO)",
                 isManual: true,
-                onTap: { /* ISO always manual */ },
+                onTap: {},
                 onStepUp: { stepISO(+1) },
                 onStepDown: { stepISO(-1) },
                 scrubber: $scrubISO,
@@ -419,7 +441,7 @@ struct ContentView: View {
                 title: "EV",
                 stringValue: String(format: "%+.1f", comp),
                 isManual: true,
-                onTap: { /* no-op */ },
+                onTap: {},
                 onStepUp: { stepEV(+1) },
                 onStepDown: { stepEV(-1) },
                 scrubber: $scrubEV,
@@ -430,14 +452,12 @@ struct ContentView: View {
             .scaleEffect(evNudgeActive ? 1.06 : 1.0)
             .opacity(evNudgeActive ? 0.95 : 1.0)
             .animation(.easeInOut(duration: 0.6), value: evNudgeActive)
-
-
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, 4)
     }
 
-    // MARK: - EV slider row (optional; keeps ticking in 1/3 steps)
+    // MARK: - EV slider row
     private var evRow: some View {
         HStack {
             Text("EC").font(Design.Text.label).frame(width: 44, alignment: .leading)
@@ -479,7 +499,7 @@ struct ContentView: View {
                 .font(Design.Text.caption)
                 .foregroundStyle(.white.opacity(0.9))
         }
-        .frame(minWidth: 84)
+        .frame(minWidth: valueMinWidth)
         .contentShape(Rectangle())
         .scaleEffect(isScrubbing.wrappedValue ? 1.04 : 1.0)
         .animation(.spring(response: 0.20, dampingFraction: 0.8), value: isScrubbing.wrappedValue)
@@ -506,15 +526,13 @@ struct ContentView: View {
         )
     }
 
-
-    // MARK: - Step helpers (±1 means one 1/3-stop step). Haptics only if value changes (no tick at bounds).
-
+    // MARK: - Step helpers (±1 = one 1/3-stop)
     private func stepAperture(_ dir: Int) {
         let table = StopsTable.fStops
         let current = StopsTable.nearest(userAperture, in: table)
         guard let idx = table.firstIndex(of: current) else { return }
         let newIdx = (idx + dir).clamped(to: 0...(table.count - 1))
-        guard newIdx != idx else { return } // at bound -> no tick
+        guard newIdx != idx else { return }
         userAperture = table[newIdx]
         Haptics.tap()
     }
@@ -550,7 +568,6 @@ struct ContentView: View {
     }
 
     private var evSteps: [Double] {
-        // -2.0 ... +2.0 in 1/3 stops
         stride(from: -2.0, through: 2.0, by: 1.0/3.0).map { Double(round($0 * 10) / 10) }
     }
     private func nearestEV(_ v: Double) -> Double {
@@ -564,6 +581,7 @@ struct ContentView: View {
             withAnimation { showToast = false }
         }
     }
+
     private func takeAndSave() {
         // Freeze values at capture time
         let s = computeSuggestion()
@@ -577,21 +595,15 @@ struct ContentView: View {
 
             switch autoParam {
             case .shutter:
-                // Aperture is manual; bias shutter only
                 let biasedT = SceneHeuristics.biasedToward(tDisplay, center: b.tCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
-                // One-pole low-pass (light smoothing)
                 tDisplay = smooth(prev: &smoothedAutoT, new: biasedT, alpha: 0.35)
-                // Snap to your shutter stops
                 tDisplay = StopsTable.nearest(tDisplay, in: StopsTable.shutters)
-
             case .aperture:
-                // Shutter is manual; bias aperture only
                 let biasedF = SceneHeuristics.biasedToward(fDisplay, center: b.fCenter, userStrength: b.strength, confidence: conf, globalGain: aiGain)
                 fDisplay = smooth(prev: &smoothedAutoF, new: biasedF, alpha: 0.35)
                 fDisplay = StopsTable.nearest(fDisplay, in: StopsTable.fStops)
             }
         } else {
-            // Reset smoothing caches when AI is off
             smoothedAutoF = nil
             smoothedAutoT = nil
         }
@@ -643,7 +655,6 @@ struct ContentView: View {
         }
     }
 
-    
     private func commitAISuggestion(keepAutoSplit: Bool = false) {
         let s = computeSuggestion()
         var fDisplay = s.f
@@ -666,6 +677,31 @@ struct ContentView: View {
         }
         toast("Applied")
     }
+    
+    private func aiSceneSymbol() -> String {
+        switch sceneEngine.scene {
+        case .portrait:  return "person.crop.circle"
+        case .group:     return "person.3"
+        case .animal:    return "pawprint"
+        case .plant:     return "leaf"
+        case .landscape: return "mountain.2"
+        case .other:     return "sparkles"
+        }
+    }
+    
+    private struct AIChip: View {
+        let systemName: String
+        var body: some View {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.12), lineWidth: 1))
+                .shadow(radius: 8, y: 4)
+        }
+    }
+
 }
 
 // MARK: - Utils
@@ -674,7 +710,6 @@ private extension Comparable {
         min(max(self, range.lowerBound), range.upperBound)
     }
 }
-
 
 #Preview {
     ContentView()

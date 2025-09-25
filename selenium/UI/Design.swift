@@ -8,10 +8,9 @@
 import SwiftUI
 
 enum Design {
-    // Spacing & radii
-    static let pad: CGFloat = 12
-    static let corner: CGFloat = 14
-    static let bigCorner: CGFloat = 18
+    static let pad: CGFloat = 8
+    static let corner: CGFloat = 16
+    static let bigCorner: CGFloat = 20
 
     // Typography
     enum Text {
